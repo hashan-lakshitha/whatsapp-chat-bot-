@@ -6,6 +6,35 @@ const ollama = require('./ollama');
 // Store chat histories to maintain context
 const chatHistories = new Map();
 
+// Rate limiter: track reply timestamps globally
+const replyTimestamps = [];
+
+// Helper: random delay between min and max seconds
+function randomDelay(minSec, maxSec) {
+    const ms = (Math.floor(Math.random() * (maxSec - minSec + 1)) + minSec) * 1000;
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Helper: check if current hour is within active hours
+function isWithinActiveHours() {
+    if (!config.ACTIVE_HOURS_ENABLED) return true;
+    const hour = new Date().getHours();
+    return hour >= config.ACTIVE_HOURS_START && hour < config.ACTIVE_HOURS_END;
+}
+
+// Helper: check rate limit (returns true if allowed)
+function isRateLimitOk() {
+    const now = Date.now();
+    const oneMinuteAgo = now - 60000;
+
+    // Remove timestamps older than 1 minute
+    while (replyTimestamps.length > 0 && replyTimestamps[0] < oneMinuteAgo) {
+        replyTimestamps.shift();
+    }
+
+    return replyTimestamps.length < config.MAX_REPLIES_PER_MIN;
+}
+
 // Initialize WhatsApp Client with LocalAuth for session persistence
 const client = new Client({
     authStrategy: new LocalAuth(),
@@ -41,6 +70,9 @@ client.on('ready', () => {
     console.log('[READY] WhatsApp client is ready and connected!');
     console.log(`[CONFIG] Model: ${config.OLLAMA_MODEL}`);
     console.log(`[CONFIG] Reply Mode: ${config.REPLY_MODE}`);
+    console.log(`[CONFIG] Reply Delay: ${config.REPLY_DELAY_MIN}-${config.REPLY_DELAY_MAX}s`);
+    console.log(`[CONFIG] Rate Limit: ${config.MAX_REPLIES_PER_MIN} replies/min`);
+    console.log(`[CONFIG] Active Hours: ${config.ACTIVE_HOURS_ENABLED ? config.ACTIVE_HOURS_START + ':00 - ' + config.ACTIVE_HOURS_END + ':00' : 'disabled (24/7)'}`);
     console.log('Waiting for messages...\n');
 });
 
@@ -61,6 +93,12 @@ client.on('disconnected', (reason) => {
 client.on('message', async (msg) => {
     const timestamp = new Date().toLocaleTimeString();
     console.log(`[${timestamp}] [INCOMING] Message from ${msg.from}: "${msg.body}"`);
+
+    // Anti-ban: Check active hours
+    if (!isWithinActiveHours()) {
+        console.log(`[${timestamp}] [OUTSIDE HOURS] Bot is sleeping (active ${config.ACTIVE_HOURS_START}:00 - ${config.ACTIVE_HOURS_END}:00)`);
+        return;
+    }
 
     // Determine if we should reply based on REPLY_MODE
     const isGroup = msg.from.includes('@g.us');
@@ -83,6 +121,12 @@ client.on('message', async (msg) => {
 
     if (!shouldReply) {
         console.log(`[${timestamp}] [SKIPPED] (mode: ${config.REPLY_MODE}, isGroup: ${isGroup})`);
+        return;
+    }
+
+    // Anti-ban: Check rate limit
+    if (!isRateLimitOk()) {
+        console.log(`[${timestamp}] [RATE LIMITED] Too many replies (max ${config.MAX_REPLIES_PER_MIN}/min). Skipping.`);
         return;
     }
 
@@ -113,6 +157,11 @@ client.on('message', async (msg) => {
         const chat = await msg.getChat();
         await chat.sendStateTyping();
 
+        // Anti-ban: Random delay before replying (simulates human typing)
+        const delay = config.REPLY_DELAY_MIN + Math.random() * (config.REPLY_DELAY_MAX - config.REPLY_DELAY_MIN);
+        console.log(`[${timestamp}] [DELAY] Waiting ${delay.toFixed(1)}s before replying...`);
+        await randomDelay(config.REPLY_DELAY_MIN, config.REPLY_DELAY_MAX);
+
         // Get response from Ollama
         console.log(`[${timestamp}] [OLLAMA] Sending to Ollama...`);
         const aiResponse = await ollama.chat(history);
@@ -124,6 +173,9 @@ client.on('message', async (msg) => {
 
         // Add assistant response to history
         history.push({ role: 'assistant', content: aiResponse });
+
+        // Record this reply for rate limiting
+        replyTimestamps.push(Date.now());
 
         // Send the reply
         await msg.reply(aiResponse);
