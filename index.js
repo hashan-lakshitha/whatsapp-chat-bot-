@@ -9,9 +9,14 @@ const chatHistories = new Map();
 // Rate limiter: track reply timestamps globally
 const replyTimestamps = [];
 
-// Helper: random delay between min and max seconds
-function randomDelay(minSec, maxSec) {
-    const ms = (Math.floor(Math.random() * (maxSec - minSec + 1)) + minSec) * 1000;
+// Helper: random delay between min and max minutes
+function randomDelayMinutes(minMin, maxMin) {
+    const minutes = minMin + Math.random() * (maxMin - minMin);
+    const ms = Math.floor(minutes * 60 * 1000);
+    return { ms, minutes };
+}
+
+function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
@@ -153,23 +158,25 @@ client.on('message', async (msg) => {
     }
 
     try {
-        // Show typing indicator
-        const chat = await msg.getChat();
-        await chat.sendStateTyping();
-
-        // Anti-ban: Random delay before replying (simulates human typing)
-        const delay = config.REPLY_DELAY_MIN + Math.random() * (config.REPLY_DELAY_MAX - config.REPLY_DELAY_MIN);
-        console.log(`[${timestamp}] [DELAY] Waiting ${delay.toFixed(1)}s before replying...`);
-        await randomDelay(config.REPLY_DELAY_MIN, config.REPLY_DELAY_MAX);
-
-        // Get response from Ollama
+        // Get response from Ollama first (before delay)
         console.log(`[${timestamp}] [OLLAMA] Sending to Ollama...`);
         const aiResponse = await ollama.chat(history);
 
+        // Anti-ban: Random delay before replying (simulates human reading + typing)
+        const { ms, minutes } = randomDelayMinutes(config.REPLY_DELAY_MIN, config.REPLY_DELAY_MAX);
+        const replyTime = new Date(Date.now() + ms).toLocaleTimeString();
         console.log(`\n${'─'.repeat(50)}`);
-        console.log(`[RECEIVED] "${messageText}"`);
-        console.log(`[REPLY]    "${aiResponse}"`);
+        console.log(`[RECEIVED at ${timestamp}] "${messageText}"`);
+        console.log(`[REPLY ready]            "${aiResponse}"`);
+        console.log(`[WAITING] ${minutes.toFixed(1)} min -- will send at ${replyTime}`);
         console.log(`${'─'.repeat(50)}\n`);
+
+        await sleep(ms);
+
+        // Show typing indicator just before sending (human-like)
+        const chat = await msg.getChat();
+        await chat.sendStateTyping();
+        await sleep(2000 + Math.random() * 3000); // short typing pause 2-5s
 
         // Add assistant response to history
         history.push({ role: 'assistant', content: aiResponse });
@@ -178,7 +185,9 @@ client.on('message', async (msg) => {
         replyTimestamps.push(Date.now());
 
         // Send the reply
+        const sentTime = new Date().toLocaleTimeString();
         await msg.reply(aiResponse);
+        console.log(`[${sentTime}] [SENT] Reply delivered!`);
 
     } catch (error) {
         console.error(`[${timestamp}] [ERROR]`, error.message);
